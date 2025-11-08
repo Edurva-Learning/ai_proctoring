@@ -56,6 +56,10 @@ except Exception:
     yolo_model = None
     print("⚠️ ultralytics.YOLO not available; object detection disabled")
 
+# Control whether detected object labels/confidences are drawn on frames.
+# Set to False to avoid showing object names in the video overlay (recommended for privacy/UI clarity).
+SHOW_OBJECT_LABELS = False
+
 
 def eye_aspect_ratio(landmarks, eye_points):
     p1 = np.array([landmarks[eye_points[1]].x, landmarks[eye_points[1]].y])
@@ -115,7 +119,7 @@ def head_pose_detection(landmarks):
         return "Head Center"
 
 
-def detect_object(frame):
+def detect_object(frame, draw_labels: bool = False):
     # returns list of labels or ['No object']
     if yolo_model is None:
         return []
@@ -128,9 +132,10 @@ def detect_object(frame):
                 label = yolo_model.names.get(cls_id, str(cls_id))
                 conf = float(box.conf[0])
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
-                # draw box for visualization
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(frame, f"{label} {conf:.2f}", (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                # draw box for visualization only when requested
+                if draw_labels or SHOW_OBJECT_LABELS:
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(frame, f"{label} {conf:.2f}", (x1, y1 - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
                 detections.append({
                     'label': label,
                     'conf': conf,
