@@ -1,0 +1,65 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+eggs/
+*.egg-info/
+parts/
+sdist/
+var/
+
+# Virtual environments
+venv/
+env/
+.venv/
+
+# Pyenv
+.python-version
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*,cover
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# VS Code
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Python compiled
+*.so
+
+# Database
+*.sqlite3
+
+# Sensitive
+.env
+
+# Models and weights (do not track large binaries here; use Git LFS or store externally)
+*.pt
+*.pth
+*.weights
+yolov8n.pt
+yolov3-tiny.weights
+
+# backups
+*~
