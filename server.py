@@ -7,19 +7,33 @@ import time
 import struct
 from datetime import datetime
 from typing import Dict
+import os
+import shutil
+import subprocess
+import requests
+import boto3
+from botocore.exceptions import BotoCoreError, ClientError
 
 import socketio
-from fastapi import FastAPI
+import recordings
+import live_streaming
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from dotenv import load_dotenv
+import psycopg2
+from psycopg2 import pool
+from datetime import timezone
+from starlette.concurrency import run_in_threadpool
  
 # ======= Socket.IO server setup =======
 sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
 app = FastAPI(title="AI Proctoring Server")
  
-# CORS configuration
+# CORS configuration - allows all domains
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://192.168.68.110:3000", "http://192.168.68.108:3000", "http://localhost:3001"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -59,6 +73,78 @@ except Exception:
 # Control whether detected object labels/confidences are drawn on frames.
 # Set to False to avoid showing object names in the video overlay (recommended for privacy/UI clarity).
 SHOW_OBJECT_LABELS = False
+
+# Segmenting / upload configuration
+SEGMENT_SECONDS = 60  # create/upload a segment every 60 seconds
+SEGMENT_FPS = 25      # fps used when encoding segments
+SEGMENT_MAX_WIDTH = 640  # downscale width for saved frames to reduce size
+NODE_UPLOAD_URL = "http://localhost:5000/exam-recordings/uploads"  # legacy: your Node server upload endpoint (not used for S3)
+
+# S3 configuration (use environment variables for credentials)
+S3_BUCKET = os.environ.get('S3_BUCKET', 'edurva-courses')
+S3_PREFIX = os.environ.get('S3_PREFIX', 'exam-recordings')
+
+# Load environment variables from .env (if present)
+load_dotenv()
+
+# Database connection pool (Postgres)
+db_pool: pool.ThreadedConnectionPool | None = None
+
+def init_db_pool():
+    global db_pool
+    if db_pool is not None:
+        return
+    db_host = os.environ.get('DB_HOST')
+    db_user = os.environ.get('DB_USER')
+    db_password = os.environ.get('DB_PASSWORD')
+    db_name = os.environ.get('DB_NAME')
+    db_port = os.environ.get('DB_PORT') or '5432'
+
+    if not (db_host and db_user and db_password and db_name):
+        print('⚠️ DB config not fully provided; DB endpoints will be disabled')
+        db_pool = None
+        return
+
+    try:
+        db_pool = psycopg2.pool.ThreadedConnectionPool(1, 10,
+                                                     host=db_host,
+                                                     user=db_user,
+                                                     password=db_password,
+                                                     dbname=db_name,
+                                                     port=int(db_port))
+        print('✅ DB connection pool initialized')
+    except Exception as e:
+        db_pool = None
+        print(f'⚠️ Failed to initialize DB pool: {e}')
+
+# Initialize DB pool on import
+init_db_pool()
+
+# internal s3 client
+_s3_client = None
+
+# ffmpeg availability
+FFMPEG_CMD = None
+
+
+def _find_ffmpeg():
+    # Delegate to recordings module
+    try:
+        return recordings._find_ffmpeg()
+    except Exception:
+        return None
+
+
+def _encode_with_cv2(work_dir: str, out_file: str, fps: int):
+    """Fallback encoder using OpenCV VideoWriter. Reads images in work_dir named frame_######.jpg."""
+    # Delegate to recordings implementation
+    return recordings._encode_with_cv2(work_dir, out_file, fps)
+
+
+def _ensure_s3_client():
+    # Delegate to recordings module for S3 client
+    return recordings._ensure_s3_client()
+
 
 
 def eye_aspect_ratio(landmarks, eye_points):
@@ -165,10 +251,81 @@ def audio_detection_from_b64(b64_audio: str):
     except Exception as e:
         print(f"⚠️ Audio detection failed: {e}")
         return "Unknown"
+
+
+# ---------- Frame segmenting and uploader helpers ----------
+def _ensure_session_tmp(session_id: str):
+    # Delegates to recordings module to keep backward-compatible API
+    return recordings._ensure_session_tmp(session_id)
+
+
+def _save_frame_for_segment(session_id: str, frame, capture_type: str = 'webcam'):
+    # Delegate to recordings module which manages saving & uploader tasks
+    try:
+        recordings.save_frame_for_segment(session_id, frame, active_sessions, capture_type)
+    except Exception as e:
+        print(f"⚠️ Failed delegating save_frame_for_segment for {session_id} (type={capture_type}): {e}")
+
+
+async def _segment_uploader_loop(session_id: str, user_id: str, capture_type: str = 'webcam'):
+    # Delegate to recordings module implementation
+    try:
+        await recordings._segment_uploader_loop(session_id, user_id, active_sessions, capture_type)
+    except Exception as e:
+        print(f"⚠️ Delegated segment uploader failed for session {session_id}: {e}")
+
+
+def _upload_segment_to_node(filepath: str, session_id: str, user_id: str, capture_type: str, segment_idx: int):
+    """Blocking upload via requests (called in a thread)."""
+    # Deprecated: kept for reference. Use _upload_segment_to_s3 instead.
+    print("⚠️ _upload_segment_to_node called but uploads now go to S3 (delegating)")
+    try:
+        session_meta = active_sessions.get(session_id, {})
+        return recordings._upload_segment_to_s3(filepath, session_id, user_id, capture_type, segment_idx, session_meta)
+    except Exception as e:
+        print(f"⚠️ _upload_segment_to_node delegation failed: {e}")
+        return False
+
+
+def _upload_segment_to_s3(filepath: str, session_id: str, user_id: str, capture_type: str, segment_idx: int):
+    """Blocking upload to S3 (called in a thread). Deletes local file after success.
+    Path template: exam-recordings/userId/examId/courseId/yyyymmdd/<timestamp>_idx.mp4
+    """
+    # Delegate to recordings implementation
+    try:
+        session_meta = active_sessions.get(session_id, {})
+        return recordings._upload_segment_to_s3(filepath, session_id, user_id, capture_type, segment_idx, session_meta)
+    except Exception as e:
+        print(f"⚠️ Delegated S3 upload failed for {filepath}: {e}")
+        return False
  
 # ======= In-Memory Storage for Proctoring Sessions =======
 # store session keys as strings to avoid int/str mismatches from client
 active_sessions: Dict[str, Dict] = {}
+
+
+# Endpoint to get a single concatenated recording for a capture type
+@app.get('/recordings/concat')
+async def get_concatenated_recording(sessionId: str = None, userId: str = None, courseId: str = None, examId: str = None, captureType: str = 'webcam'):
+    """Return a single concatenated mp4 for the requested identifiers and captureType ('webcam' or 'screen').
+    Query params: sessionId, userId, courseId, examId, captureType
+    """
+    # Build session_meta for recordings helper (supports camelCase and snake_case keys)
+    session_meta = {}
+    if userId:
+        session_meta['userId'] = userId
+    if courseId:
+        session_meta['courseId'] = courseId
+    if examId:
+        session_meta['examId'] = examId
+    if sessionId:
+        session_meta['session_id'] = sessionId
+
+    try:
+        out_path = recordings.combine_s3_segments_to_local(session_meta, captureType)
+        return FileResponse(out_path, media_type='video/mp4', filename=os.path.basename(out_path))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
  
 # ======= Socket.IO events =======
 @sio.event
@@ -255,6 +412,13 @@ async def on_join_room(sid, data):
             'created_at': datetime.now().isoformat()
         }
         print(f"🏠 Created new proctoring session {session_id}")
+    # If client provided course/exam metadata include it for uploads
+    course_id = data.get('courseId') or data.get('course_id')
+    exam_id = data.get('examId') or data.get('exam_id')
+    if course_id:
+        active_sessions[session_id]['course_id'] = str(course_id)
+    if exam_id:
+        active_sessions[session_id]['exam_id'] = str(exam_id)
    
     # Update session based on user type
     if user_type == 'faculty':
@@ -279,6 +443,13 @@ async def on_join_room(sid, data):
         else:
             active_sessions[session_id]['student_sid'] = sid
             active_sessions[session_id]['student_id'] = user_id
+        # capture optional metadata
+        course_id = data.get('courseId') or data.get('course_id')
+        exam_id = data.get('examId') or data.get('exam_id')
+        if course_id:
+            active_sessions[session_id]['course_id'] = str(course_id)
+        if exam_id:
+            active_sessions[session_id]['exam_id'] = str(exam_id)
    
     # Send confirmation
     await sio.emit("room_joined", {
@@ -337,10 +508,20 @@ async def on_stream_frame(sid, data):
         except Exception as e:
             print(f"⚠️ Failed to notify faculty of late student join: {e}")
         print(f"✅ Registered student SID from first frame for session {session_id}")
+        # capture optional metadata sent with frames
+        course_id = data.get('courseId') or data.get('course_id')
+        exam_id = data.get('examId') or data.get('exam_id')
+        if course_id:
+            active_sessions[session_id]['course_id'] = str(course_id)
+        if exam_id:
+            active_sessions[session_id]['exam_id'] = str(exam_id)
     elif active_sessions[session_id].get('student_sid') != sid:
         # Different socket trying to stream and a student already registered
         print(f"❌ Unauthorized stream attempt from {sid} for session {session_id}")
         return
+
+    # room_name used when forwarding frames to faculty
+    room_name = f"exam_{session_id}"
  
     try:
         # Decode base64 image
@@ -354,6 +535,12 @@ async def on_stream_frame(sid, data):
         if frame is None:
             print("❌ Failed to decode frame")
             return
+
+        # Save frame for segmenting/upload (downscaled jpg)
+        try:
+            _save_frame_for_segment(session_id, frame)
+        except Exception as _e:
+            print(f"⚠️ Failed to queue frame for segmenting: {_e}")
  
         # Extract optional audio blob (base64) if client sent it
         audio_blob = data.get('audio')
@@ -649,24 +836,81 @@ async def on_stream_frame(sid, data):
                 "detection": detection_data
             }
            
-            # Emit to the exam room (faculty monitor)
-            room_name = f"exam_{session_id}"
-            await sio.emit("receive_frame", frame_data_payload, room=room_name)
+            # Emit to faculty (delegate to live_streaming module)
+            try:
+                await live_streaming.forward_frame_to_proctors(session_id, frame_data_payload, active_sessions, sio)
+            except Exception as e:
+                print(f"⚠️ live_streaming.forward_frame_to_proctors failed: {e}")
  
-            # Additional direct emits to registered faculty SIDs as a robustness fallback
-            faculty_list = active_sessions.get(session_id, {}).get('faculty_members', []) or []
-            for fac_sid in faculty_list:
-                try:
-                    await sio.emit("receive_frame", frame_data_payload, to=fac_sid)
-                except Exception as e:
-                    print(f"⚠️ Failed to emit frame directly to faculty {fac_sid}: {e}")
- 
-            print(f"📹 Frame sent to room {room_name} (faculty: {len(faculty_list)}) - Face: {detection_data['faceDetected']} - Alerts: {len(detection_data['proctoringAlerts'])}")
+            faculty_count = len(active_sessions.get(session_id, {}).get('faculty_members', []) or [])
+            print(f"📹 Frame sent to room {room_name} (faculty: {faculty_count}) - Face: {detection_data['faceDetected']} - Alerts: {len(detection_data['proctoringAlerts'])}")
  
     except Exception as e:
         print(f"❌ Error processing frame: {e}")
         await sio.emit("error", {"message": f"Frame processing error: {str(e)}"}, to=sid)
- 
+
+@sio.on("screen_frame")
+async def on_screen_frame(sid, data):
+    # Minimal forwarding of screen-share frames (NO AI analysis)
+    session_id_raw = data.get("sessionId")
+    user_id_raw = data.get("userId")
+    frame_data = data.get("frame")
+
+    session_id = str(session_id_raw) if session_id_raw is not None else None
+    user_id = str(user_id_raw) if user_id_raw is not None else None
+
+    if not all([session_id, user_id, frame_data]):
+        return
+
+    # Reuse same session lookup by student_id when needed
+    if session_id not in active_sessions:
+        for s_id, s_data in active_sessions.items():
+            if s_data.get('student_id') == user_id:
+                session_id = s_id
+                break
+        else:
+            return
+
+    try:
+        if frame_data.startswith('data:image'):
+            frame_data = frame_data.split(',')[1]
+
+        img_data = base64.b64decode(frame_data)
+        nparr = np.frombuffer(img_data, np.uint8)
+        screen_frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+
+        if screen_frame is None:
+            return
+
+        # Save screen-share frames for segmenting/upload (downscaled jpg)
+        try:
+            _save_frame_for_segment(session_id, screen_frame, capture_type='screen')
+        except Exception as _e:
+            print(f"⚠️ Failed to queue screen frame for segmenting: {_e}")
+
+        # Re-encode to a JPEG data URL for forwarding (no AI processing)
+        _, buffer = cv2.imencode('.jpg', screen_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
+        screen_b64 = base64.b64encode(buffer).decode('utf-8')
+        screen_url = f"data:image/jpeg;base64,{screen_b64}"
+
+        # Store last screen frame in session for API/inspection
+        active_sessions[session_id]['last_screen_frame'] = screen_url
+
+        payload = {
+            "userId": user_id,
+            "sessionId": session_id,
+            "screenFrame": screen_url
+        }
+
+        # Forward screen frame to faculty via live_streaming module
+        try:
+            await live_streaming.forward_screen_to_proctors(session_id, payload, active_sessions, sio)
+        except Exception as e:
+            print(f"⚠️ live_streaming.forward_screen_to_proctors failed: {e}")
+
+    except Exception as e:
+        print(f"Screen frame error: {e}")
+
 @sio.on("get_session_status")
 async def on_get_session_status(sid, data):
     """Get status of a proctoring session"""
@@ -715,6 +959,13 @@ async def on_end_proctoring(sid, data):
         }, room=room_name)
        
         # Clean up session
+        # Remove any temporary frames/segments
+        try:
+            tmpdir = os.path.join(os.path.dirname(__file__), 'tmp', session_id)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        except Exception:
+            pass
+
         del active_sessions[session_id]
         print(f"🗑️ Proctoring session {session_id} ended and cleaned up")
  
@@ -752,6 +1003,94 @@ async def health_check():
 async def root():
     return {"message": "AI Proctoring Server is running - WebSocket only"}
  
+# ======= Proctorings API =======
+def _map_payload_field(payload: dict, *names):
+    """Return first non-empty value found in payload for given field names (supports snake_case and camelCase)."""
+    for n in names:
+        v = payload.get(n)
+        if v is not None:
+            return v
+    return None
+
+def _insert_proctoring_record_sync(record: dict):
+    """Blocking insertion into proctorings table. Returns inserted record id if available."""
+    global db_pool
+    if db_pool is None:
+        raise RuntimeError('DB pool not initialized')
+
+    conn = None
+    cur = None
+    try:
+        conn = db_pool.getconn()
+        cur = conn.cursor()
+        sql = (
+            "INSERT INTO proctorings (user_id, course_id, exam_id, session_id, s3_folder_url, created_at)"
+            " VALUES (%s, %s, %s, %s, %s, %s) RETURNING id"
+        )
+        params = (
+            record.get('user_id'),
+            record.get('course_id'),
+            record.get('exam_id'),
+            record.get('session_id'),
+            record.get('s3_folder_url'),
+            record.get('created_at')
+        )
+        cur.execute(sql, params)
+        inserted_id = None
+        try:
+            inserted_id = cur.fetchone()[0]
+        except Exception:
+            inserted_id = None
+        conn.commit()
+        return inserted_id
+    finally:
+        try:
+            if cur:
+                cur.close()
+        except Exception:
+            pass
+        try:
+            if conn:
+                db_pool.putconn(conn)
+        except Exception:
+            pass
+
+
+@app.post('/proctorings')
+async def create_proctoring(payload: dict):
+    """Create a proctoring metadata record. Expects JSON payload with:
+    `user_id`, `course_id`, `exam_id`, `session_id`, `s3_folder_url`.
+    Accepts camelCase keys as well (e.g., `userId`)."""
+    # simple validation + accept camelCase
+    user_id = _map_payload_field(payload, 'user_id', 'userId')
+    course_id = _map_payload_field(payload, 'course_id', 'courseId')
+    exam_id = _map_payload_field(payload, 'exam_id', 'examId')
+    session_id = _map_payload_field(payload, 'session_id', 'sessionId')
+    s3_folder_url = _map_payload_field(payload, 's3_folder_url', 's3FolderUrl', 's3_folder')
+
+    missing = [k for k, v in (
+        ('user_id', user_id), ('course_id', course_id), ('exam_id', exam_id), ('session_id', session_id), ('s3_folder_url', s3_folder_url)
+    ) if not v]
+    if missing:
+        raise HTTPException(status_code=400, detail={"error": "missing_fields", "fields": missing})
+
+    record = {
+        'user_id': str(user_id),
+        'course_id': str(course_id),
+        'exam_id': str(exam_id),
+        'session_id': str(session_id),
+        's3_folder_url': str(s3_folder_url),
+        'created_at': datetime.now(timezone.utc).isoformat()
+    }
+
+    if db_pool is None:
+        raise HTTPException(status_code=503, detail="DB not configured on server")
+
+    try:
+        inserted_id = await run_in_threadpool(_insert_proctoring_record_sync, record)
+        return {"status": "ok", "id": inserted_id, "record": record}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 # ======= Run server =======
 if __name__ == "__main__":
     import uvicorn

@@ -63,3 +63,8 @@ yolov3-tiny.weights
 
 # backups
 *~
+
+# Elastic Beanstalk Files
+.elasticbeanstalk/*
+!.elasticbeanstalk/*.cfg.yml
+!.elasticbeanstalk/*.global.yml
