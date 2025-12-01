@@ -1,12 +1,14 @@
-boto3
-# Requirements for proct (proctoring) service
+# Requirements for proctoring service
+boto3>=1.26
 flask>=2.0
 flask-cors>=3.0
 opencv-python>=4.5.5.64
 mediapipe>=0.10.0
 numpy>=1.23
-pyaudio>=0.2.12
+# On Windows, prefer the prebuilt PyAudio wheels; other OSes may require portaudio
+pyaudio>=0.2.12; sys_platform == "win32"
 ultralytics>=8.0.0
+
 # Optional / dev
 # typing-extensions>=4.0
 
