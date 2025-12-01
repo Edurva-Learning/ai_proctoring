@@ -20,6 +20,96 @@ FORCE_CV2 = str(os.environ.get('FORCE_CV2', '')).lower() in ('1', 'true', 'yes')
 
 _s3_client = None
 FFMPEG_CMD = None
+# Tmp dir configuration and cleanup defaults
+TMP_BASE = os.environ.get('SESSIONS_TMP_DIR') or os.path.join(os.path.dirname(__file__), 'tmp')
+TMP_CLEANUP_INTERVAL = int(os.environ.get('TMP_CLEANUP_INTERVAL', str(60 * 60)))  # seconds between cleanup runs (default 1h)
+TMP_CLEANUP_AGE = int(os.environ.get('TMP_CLEANUP_AGE', str(60 * 60)))  # session dirs older than this (seconds) will be removed
+
+
+def _cleanup_session_tmp(session_id: str, base: str = None):
+    """Remove the session tmp folder if it exists and is empty.
+
+    This is a best-effort helper to remove leftover session folders once all
+    frames/segments have been removed. It will only delete the specific
+    session folder when it contains no files or subdirectories.
+    """
+    try:
+        base_dir = base or TMP_BASE
+        path = os.path.join(base_dir, session_id)
+        if not os.path.exists(path):
+            return False
+        # Only remove if directory is empty
+        if any(os.scandir(path)):
+            return False
+        shutil.rmtree(path, ignore_errors=True)
+        return True
+    except Exception:
+        return False
+
+
+def cleanup_old_tmp(base: str = None, max_age_seconds: int = None, exclude_sessions: set | None = None):
+    """Remove session tmp folders older than `max_age_seconds`.
+
+    - `base`: base tmp directory; defaults to `TMP_BASE`.
+    - `max_age_seconds`: age threshold; defaults to `TMP_CLEANUP_AGE`.
+    - `exclude_sessions`: optional set of session ids to skip.
+    """
+    try:
+        base_dir = base or TMP_BASE
+        age = max_age_seconds or TMP_CLEANUP_AGE
+        now = time.time()
+        if not os.path.exists(base_dir):
+            return []
+        removed = []
+        for entry in os.scandir(base_dir):
+            if not entry.is_dir():
+                continue
+            sid = entry.name
+            if exclude_sessions and sid in exclude_sessions:
+                continue
+            try:
+                mtime = os.path.getmtime(entry.path)
+                if (now - mtime) > age:
+                    shutil.rmtree(entry.path, ignore_errors=True)
+                    removed.append(entry.path)
+            except Exception:
+                continue
+        return removed
+    except Exception:
+        return []
+
+
+def start_periodic_tmp_cleanup(exclude_sessions_getter=None, base: str = None, interval: int = None, age: int = None):
+    """Start a background daemon thread that periodically removes old tmp folders.
+
+    - `exclude_sessions_getter`: optional callable returning an iterable of session ids to exclude.
+    - `base`: tmp base directory to clean (defaults to `TMP_BASE`).
+    - `interval`: seconds between runs (defaults to `TMP_CLEANUP_INTERVAL`).
+    - `age`: age threshold in seconds (defaults to `TMP_CLEANUP_AGE`).
+    """
+    import threading
+
+    def _loop():
+        b = base or TMP_BASE
+        itv = interval or TMP_CLEANUP_INTERVAL
+        a = age or TMP_CLEANUP_AGE
+        while True:
+            try:
+                exclude = None
+                if callable(exclude_sessions_getter):
+                    try:
+                        ex = exclude_sessions_getter()
+                        exclude = set(ex) if ex is not None else None
+                    except Exception:
+                        exclude = None
+                cleanup_old_tmp(base=b, max_age_seconds=a, exclude_sessions=exclude)
+            except Exception:
+                pass
+            time.sleep(itv)
+
+    t = threading.Thread(target=_loop, daemon=True)
+    t.start()
+    return t
 
 
 def _find_ffmpeg():
@@ -74,7 +164,7 @@ def _ensure_s3_client():
 
 
 def _ensure_session_tmp(session_id: str):
-    base = os.path.join(os.path.dirname(__file__), 'tmp')
+    base = TMP_BASE
     path = os.path.join(base, session_id)
     os.makedirs(path, exist_ok=True)
     return path
@@ -229,6 +319,13 @@ async def _segment_uploader_loop(session_id: str, user_id: str, active_sessions:
             try:
                 if os.path.exists(out_file):
                     os.remove(out_file)
+            except Exception:
+                pass
+
+            # Attempt best-effort cleanup of the session tmp folder if it's empty
+            try:
+                # _cleanup_session_tmp will only delete when directory is empty
+                _cleanup_session_tmp(session_id)
             except Exception:
                 pass
 
@@ -401,7 +498,7 @@ def combine_s3_segments_to_local(session_meta: dict, capture_type: str, work_dir
     objs.sort(key=lambda x: x[0])
 
     if not work_dir_root:
-        work_dir_root = os.path.join(os.path.dirname(__file__), 'tmp')
+        work_dir_root = TMP_BASE
     work_dir = os.path.join(work_dir_root, f"concat_{user_part}_{exam_part}_{capture_type}")
     shutil.rmtree(work_dir, ignore_errors=True)
     os.makedirs(work_dir, exist_ok=True)
