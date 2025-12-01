@@ -11,6 +11,9 @@ import struct
 mp_face_mesh = mp.solutions.face_mesh
 mp_drawing = mp.solutions.drawing_utils
 
+# Hide face mesh overlay by default in UI
+SHOW_FACE_MESH = False
+
 # Global records
 data_record = []
 running = True
@@ -193,12 +196,13 @@ def proctoringAlgo():
                     record.append(head_pose)
                     print(head_pose)
 
-                    # Draw mesh
-                    mp_drawing.draw_landmarks(
-                        frame, landmarks, mp_face_mesh.FACEMESH_TESSELATION,
-                        mp_drawing.DrawingSpec(color=(0, 255, 255), thickness=1, circle_radius=1),
-                        mp_drawing.DrawingSpec(color=(0, 0, 255), thickness=1)
-                    )
+                    # Draw mesh (only if enabled)
+                    if SHOW_FACE_MESH:
+                        mp_drawing.draw_landmarks(
+                            frame, landmarks, mp_face_mesh.FACEMESH_TESSELATION,
+                            mp_drawing.DrawingSpec(color=(0, 255, 255), thickness=1, circle_radius=1),
+                            mp_drawing.DrawingSpec(color=(0, 0, 255), thickness=1)
+                        )
 
             else:
                 record.append("No face detected")

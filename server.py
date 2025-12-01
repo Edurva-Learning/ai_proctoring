@@ -46,6 +46,9 @@ mp_face_mesh = mp.solutions.face_mesh
 mp_drawing = mp.solutions.drawing_utils
 mp_drawing_styles = mp.solutions.drawing_styles
 
+# Control whether the face-mesh overlay is drawn on frames sent to faculty UI
+SHOW_FACE_MESH = False
+
 # ---------------- Detection helper settings (ported from temp.py) ----------------
 EAR_THRESHOLD = 0.2
 LEFT_EYE = [33, 160, 158, 133, 153, 144]
@@ -585,38 +588,40 @@ async def on_stream_frame(sid, data):
                
                 # Draw landmarks on frame for visualization and compute per-face metrics
                 for face_landmarks in results.multi_face_landmarks:
-                    try:
-                        mp_drawing.draw_landmarks(
-                            image=frame,
-                            landmark_list=face_landmarks,
-                            connections=mp_face_mesh.FACEMESH_TESSELATION,
-                            landmark_drawing_spec=None,
-                            connection_drawing_spec=mp_drawing_styles.get_default_face_mesh_tesselation_style()
-                        )
-                        mp_drawing.draw_landmarks(
-                            image=frame,
-                            landmark_list=face_landmarks,
-                            connections=mp_face_mesh.FACEMESH_CONTOURS,
-                            landmark_drawing_spec=None,
-                            connection_drawing_spec=mp_drawing_styles.get_default_face_mesh_contours_style()
-                        )
-                        mp_drawing.draw_landmarks(
-                            image=frame,
-                            landmark_list=face_landmarks,
-                            connections=mp_face_mesh.FACEMESH_IRISES,
-                            landmark_drawing_spec=None,
-                            connection_drawing_spec=mp_drawing_styles.get_default_face_mesh_iris_connections_style()
-                        )
-                    except Exception as draw_error:
-                        # Fallback to simple drawing
-                        print(f"⚠️ Drawing styles error, using fallback: {draw_error}")
-                        mp_drawing.draw_landmarks(
-                            image=frame,
-                            landmark_list=face_landmarks,
-                            connections=mp_face_mesh.FACEMESH_TESSELATION,
-                            landmark_drawing_spec=None,
-                            connection_drawing_spec=mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=1)
-                        )
+                    # Draw face-mesh overlays only when explicitly enabled
+                    if SHOW_FACE_MESH:
+                        try:
+                            mp_drawing.draw_landmarks(
+                                image=frame,
+                                landmark_list=face_landmarks,
+                                connections=mp_face_mesh.FACEMESH_TESSELATION,
+                                landmark_drawing_spec=None,
+                                connection_drawing_spec=mp_drawing_styles.get_default_face_mesh_tesselation_style()
+                            )
+                            mp_drawing.draw_landmarks(
+                                image=frame,
+                                landmark_list=face_landmarks,
+                                connections=mp_face_mesh.FACEMESH_CONTOURS,
+                                landmark_drawing_spec=None,
+                                connection_drawing_spec=mp_drawing_styles.get_default_face_mesh_contours_style()
+                            )
+                            mp_drawing.draw_landmarks(
+                                image=frame,
+                                landmark_list=face_landmarks,
+                                connections=mp_face_mesh.FACEMESH_IRISES,
+                                landmark_drawing_spec=None,
+                                connection_drawing_spec=mp_drawing_styles.get_default_face_mesh_iris_connections_style()
+                            )
+                        except Exception as draw_error:
+                            # Fallback to simple drawing (only if mesh drawing enabled)
+                            print(f"⚠️ Drawing styles error, using fallback: {draw_error}")
+                            mp_drawing.draw_landmarks(
+                                image=frame,
+                                landmark_list=face_landmarks,
+                                connections=mp_face_mesh.FACEMESH_TESSELATION,
+                                landmark_drawing_spec=None,
+                                connection_drawing_spec=mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=1)
+                            )
 
                     # compute detection metrics (use landmarks list)
                     try:

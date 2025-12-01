@@ -7,6 +7,9 @@ mp_face_mesh = mp.solutions.face_mesh
 mp_drawing = mp.solutions.drawing_utils
 mp_styles = mp.solutions.drawing_styles
 
+# Hide face mesh overlay by default in UI
+SHOW_FACE_MESH = False
+
 # Initialize FaceMesh
 face_mesh = mp_face_mesh.FaceMesh(
     max_num_faces=1,
@@ -56,14 +59,15 @@ while True:
     if results.multi_face_landmarks:
         for face_landmarks in results.multi_face_landmarks:
 
-            # Draw face mesh for observation
-            mp_drawing.draw_landmarks(
-                frame,
-                face_landmarks,
-                mp_face_mesh.FACEMESH_TESSELATION,
-                landmark_drawing_spec=None,
-                connection_drawing_spec=mp_styles.get_default_face_mesh_tesselation_style()
-            )
+            # Draw face mesh for observation (only if enabled)
+            if SHOW_FACE_MESH:
+                mp_drawing.draw_landmarks(
+                    frame,
+                    face_landmarks,
+                    mp_face_mesh.FACEMESH_TESSELATION,
+                    landmark_drawing_spec=None,
+                    connection_drawing_spec=mp_styles.get_default_face_mesh_tesselation_style()
+                )
 
             # Mouth detection
             mouthTrack(face_landmarks, w, h, frame)

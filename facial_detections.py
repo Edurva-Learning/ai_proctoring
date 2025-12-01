@@ -6,6 +6,9 @@ import numpy as np
 mp_face_mesh = mp.solutions.face_mesh
 mp_drawing = mp.solutions.drawing_utils
 
+# Control whether face-mesh overlays are drawn (UI)
+SHOW_FACE_MESH = False
+
 # Face mesh with landmarks
 face_mesh = mp_face_mesh.FaceMesh(
     max_num_faces=5,         # detect up to 5 faces
@@ -86,36 +89,37 @@ def detectFace(frame):
 
             faces.append(face_points)
 
-            # Draw face landmarks
-            mp_drawing.draw_landmarks(
-                image=frame,
-                landmark_list=face_landmarks,
-                connections=mp_face_mesh.FACEMESH_TESSELATION,
-                landmark_drawing_spec=None,
-                connection_drawing_spec=mp_drawing.DrawingSpec(
-                    color=(0, 255, 255),
-                    thickness=1,
-                    circle_radius=1
+            # Optionally draw face landmarks and fancy corners
+            if SHOW_FACE_MESH:
+                mp_drawing.draw_landmarks(
+                    image=frame,
+                    landmark_list=face_landmarks,
+                    connections=mp_face_mesh.FACEMESH_TESSELATION,
+                    landmark_drawing_spec=None,
+                    connection_drawing_spec=mp_drawing.DrawingSpec(
+                        color=(0, 255, 255),
+                        thickness=1,
+                        circle_radius=1
+                    )
                 )
-            )
 
-            # Draw fancy corners using bounding box
-            x_vals = [p[0] for p in face_points]
-            y_vals = [p[1] for p in face_points]
-            x, y, w_box, h_box = min(x_vals), min(y_vals), max(x_vals)-min(x_vals), max(y_vals)-min(y_vals)
+                # Draw fancy corners using bounding box
+                x_vals = [p[0] for p in face_points]
+                y_vals = [p[1] for p in face_points]
+                x, y, w_box, h_box = min(x_vals), min(y_vals), max(x_vals)-min(x_vals), max(y_vals)-min(y_vals)
 
-            # top-left
-            cv2.line(frame, (x, y), (x+20, y), (0, 255, 255), 2)
-            cv2.line(frame, (x, y), (x, y+20), (0, 255, 255), 2)
-            # top-right
-            cv2.line(frame, (x+w_box, y), (x+w_box-20, y), (0, 255, 255), 2)
-            cv2.line(frame, (x+w_box, y), (x+w_box, y+20), (0, 255, 255), 2)
-            # bottom-left
-            cv2.line(frame, (x, y+h_box), (x+20, y+h_box), (0, 255, 255), 2)
-            cv2.line(frame, (x, y+h_box), (x, y+h_box-20), (0, 255, 255), 2)
-            # bottom-right
-            cv2.line(frame, (x+w_box, y+h_box), (x+w_box-20, y+h_box), (0, 255, 255), 2)
-            cv2.line(frame, (x+w_box, y+h_box), (x+w_box, y+h_box-20), (0, 255, 255), 2)
+                # top-left
+                cv2.line(frame, (x, y), (x+20, y), (0, 255, 255), 2)
+                cv2.line(frame, (x, y), (x, y+20), (0, 255, 255), 2)
+                # top-right
+                cv2.line(frame, (x+w_box, y), (x+w_box-20, y), (0, 255, 255), 2)
+                cv2.line(frame, (x+w_box, y), (x+w_box, y+20), (0, 255, 255), 2)
+                # bottom-left
+                cv2.line(frame, (x, y+h_box), (x+20, y+h_box), (0, 255, 255), 2)
+                cv2.line(frame, (x, y+h_box), (x, y+h_box-20), (0, 255, 255), 2)
+                # bottom-right
+                cv2.line(frame, (x+w_box, y+h_box), (x+w_box-20, y+h_box), (0, 255, 255), 2)
+                cv2.line(frame, (x+w_box, y+h_box), (x+w_box, y+h_box-20), (0, 255, 255), 2)
 
     return (faceCount, faces)
 
