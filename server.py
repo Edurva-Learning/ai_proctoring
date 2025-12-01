@@ -655,8 +655,15 @@ async def on_stream_frame(sid, data):
 
                         # Object detection (YOLO) - operate on the current frame image
                         objects = detect_object(frame)
-                        # Only alert when meaningful objects are detected
-                        if objects and not any(x in objects for x in ("No object", "Object detection unavailable", "Detection error")):
+                        # Debug: log raw object detections for troubleshooting
+                        if objects:
+                            try:
+                                print(f"🔎 Raw YOLO detections: {[{'label': d.get('label'), 'conf': d.get('conf')} for d in objects]}")
+                            except Exception:
+                                print(f"🔎 Raw YOLO detections (unprintable): {objects}")
+                        # Only proceed when meaningful objects are detected
+                        # `objects` is expected to be a list of detection dicts (or empty list)
+                        if objects:
                             # Normalize labels for matching
                             labels_lower = [str(o).lower() for o in objects]
 
@@ -670,6 +677,8 @@ async def on_stream_frame(sid, data):
 
                             # Build face bounding box (pixels) from landmarks to ignore object detections overlapping the face
                             try:
+                                # Ensure we have frame dimensions available before using them
+                                frame_h, frame_w = frame.shape[:2]
                                 xs = [int(lm.x * frame_w) for lm in landmarks]
                                 ys = [int(lm.y * frame_h) for lm in landmarks]
                                 fx1, fy1 = max(0, min(xs)), max(0, min(ys))
@@ -682,7 +691,8 @@ async def on_stream_frame(sid, data):
                                 face_box = None
 
                             # Device detection filtering: require higher confidence and ignore detections overlapping the face
-                            min_conf_device = 0.50
+                            # Lowered threshold to make mobile/phone detections more permissive during typical webcam views
+                            min_conf_device = 0.30
                             devices_found = []
                             for d in objects:
                                 lbl = str(d.get('label', '')).lower()
@@ -691,12 +701,26 @@ async def on_stream_frame(sid, data):
                                 if not box:
                                     continue
                                 if any(k in lbl for k in device_keywords) and conf >= min_conf_device:
-                                    # ignore if device box overlaps significantly with face box (likely misclassification on face)
+                                    # ignore if device box appears to be on the face (likely misclassification)
                                     try:
                                         if face_box is not None:
-                                            if iou(face_box, box) > 0.25:
-                                                # overlapping with face -> ignore
+                                            # prefer a center-inside-face heuristic instead of a low IoU cutoff
+                                            # compute device center
+                                            dbx1, dby1, dbx2, dby2 = box
+                                            dcx = (dbx1 + dbx2) / 2.0
+                                            dcy = (dby1 + dby2) / 2.0
+                                            fx1, fy1, fx2, fy2 = face_box
+                                            # if device center lies inside the face box, it's likely a mis-detection on the face -> ignore
+                                            if fx1 <= dcx <= fx2 and fy1 <= dcy <= fy2:
+                                                print(f"🔍 Ignoring device detection because device center inside face box: label={lbl}, conf={conf:.2f}")
                                                 continue
+                                            # fallback: if center check fails but IoU is very high, still ignore
+                                            try:
+                                                if iou(face_box, box) > 0.60:
+                                                    print(f"🔍 Ignoring device detection due to high IoU with face: label={lbl}, conf={conf:.2f}, iou={iou(face_box, box):.2f}")
+                                                    continue
+                                            except Exception:
+                                                pass
                                     except Exception:
                                         pass
                                     devices_found.append(d['label'])
@@ -724,6 +748,7 @@ async def on_stream_frame(sid, data):
                                 if 'person' in lbl and conf >= min_conf and area >= (min_area_ratio * frame_area):
                                     person_boxes.append(box)
 
+                            # IoU helper (defined ahead of use so overlap checks work)
                             def iou(a, b):
                                 (x1, y1, x2, y2) = a
                                 (x3, y3, x4, y4) = b
